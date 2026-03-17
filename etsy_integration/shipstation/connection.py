@@ -79,6 +79,7 @@ def store_request_data():
     if not raw:
         return {"status": "empty"}
 
+    if isinstance(raw, bytes): raw = raw.decode("utf-8")
     data = json.loads(raw)
     resource_type = data.get("resource_type", "")
     resource_url = data.get("resource_url", "")
@@ -110,3 +111,4 @@ def store_request_data():
     )
 
     return {"status": "queued", "log": log.name}
+
