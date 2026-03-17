@@ -5,9 +5,7 @@ import frappe
 from frappe.utils import add_days, getdate, now_datetime
 
 from etsy_integration.shipstation.constants import (
-    SS_MODIFY_FIELD,
     SS_ORDER_ID_FIELD,
-    SS_ORDER_NUM_FIELD,
     SS_STATUS_FIELD,
     SETTING_DOCTYPE,
     STORE_CHANNEL_MAP_FIELD,
@@ -202,10 +200,8 @@ def _create_or_update_sales_order(order, customer_name, addr_name, full_address)
     should_submit = order_status in ("awaiting_shipment", "shipped")
 
     ss_fields = {
-        SS_ORDER_ID_FIELD:  ss_order_id,
-        SS_ORDER_NUM_FIELD: order_number,
-        SS_STATUS_FIELD:    order_status,
-        SS_MODIFY_FIELD:    order.get("modifyDate", ""),
+        SS_ORDER_ID_FIELD: ss_order_id,
+        SS_STATUS_FIELD:   order_status,
     }
 
     existing = None
@@ -308,3 +304,5 @@ def handle_notification(payload, request_id=None):
     """
     frappe.flags.request_id = request_id
     _update_log(request_id, "Success")
+
+

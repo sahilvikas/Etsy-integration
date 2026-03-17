@@ -9,11 +9,8 @@ EVENT_MAPPER = {
 }
 
 # Custom fields on Sales Order
-# Add these via ERPNext Customize Form on Sales Order
 SS_ORDER_ID_FIELD = "custom_shipstation_order_id"
-SS_ORDER_NUM_FIELD = "custom_shipstation_order_number"
 SS_STATUS_FIELD = "custom_shipstation_status"
-SS_MODIFY_FIELD = "custom_shipstation_modify_date"
 
 # Maps ShipStation storeId to custom_sales_channel on Sales Order
 # Add a Small Text field called store_channel_map on ShipStation Settings
