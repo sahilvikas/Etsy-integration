@@ -1,0 +1,310 @@
+﻿import json
+import re
+
+import frappe
+from frappe.utils import add_days, getdate, now_datetime
+
+from etsy_integration.shipstation.constants import (
+    SS_MODIFY_FIELD,
+    SS_ORDER_ID_FIELD,
+    SS_ORDER_NUM_FIELD,
+    SS_STATUS_FIELD,
+    SETTING_DOCTYPE,
+    STORE_CHANNEL_MAP_FIELD,
+)
+
+
+def _update_log(request_id, status, exception=None, rollback=False):
+    if rollback:
+        frappe.db.rollback()
+    if not request_id:
+        return
+    log = frappe.get_doc("Etsy Integration Log", request_id)
+    log.status = status
+    if exception:
+        log.message = str(exception)
+        log.traceback = frappe.get_traceback()
+    log.save(ignore_permissions=True)
+    frappe.db.commit()
+
+
+def _get_receipt_id(order_number):
+    return re.sub(r"^ETSY-", "", order_number).strip()
+
+
+def _get_sales_channel(store_id):
+    if not store_id:
+        return ""
+    try:
+        raw = frappe.db.get_single_value(SETTING_DOCTYPE, STORE_CHANNEL_MAP_FIELD)
+        if not raw:
+            return ""
+        mapping = json.loads(raw)
+        return mapping.get(str(store_id), "")
+    except Exception:
+        return ""
+
+
+def _sync_customer(order):
+    ship_to = order.get("shipTo", {})
+    customer_name = (
+        ship_to.get("name")
+        or order.get("customerUsername")
+        or order.get("billTo", {}).get("name")
+        or "Etsy Customer"
+    ).strip()
+
+    if not frappe.db.exists("Customer", customer_name):
+        frappe.get_doc({
+            "doctype": "Customer",
+            "customer_name": customer_name,
+            "customer_group": "All Customer Groups",
+            "territory": "All Territories",
+            "customer_type": "Individual",
+        }).insert(ignore_permissions=True)
+        frappe.db.commit()
+
+    updates = {}
+    if order.get("customerEmail"):
+        if not frappe.db.get_value("Customer", customer_name, "email_id"):
+            updates["email_id"] = order["customerEmail"]
+    if ship_to.get("phone"):
+        if not frappe.db.get_value("Customer", customer_name, "mobile_no"):
+            updates["mobile_no"] = ship_to["phone"]
+    if updates:
+        frappe.db.set_value("Customer", customer_name, updates)
+
+    return customer_name
+
+
+def _sync_address(order, customer_name):
+    ship_to = order.get("shipTo", {})
+    if not ship_to.get("street1"):
+        return None, None
+
+    receipt_id    = _get_receipt_id(order.get("orderNumber", ""))
+    address_title = f"{ship_to.get('name', customer_name)} - {receipt_id}"
+    address_line1 = (ship_to.get("street1") or "").strip()
+    address_line2 = (ship_to.get("street2") or "").strip()
+    city          = (ship_to.get("city") or "").strip()
+    state         = (ship_to.get("state") or "").strip()
+    pincode       = (ship_to.get("postalCode") or "").strip()
+    country       = (ship_to.get("country") or "United States").strip()
+    phone         = (ship_to.get("phone") or "").strip()
+    email         = (order.get("customerEmail") or "").strip()
+
+    existing = frappe.db.get_value("Address", {"address_title": address_title}, "name")
+
+    if existing:
+        addr = frappe.get_doc("Address", existing)
+        addr.address_line1 = address_line1
+        addr.address_line2 = address_line2
+        addr.city    = city
+        addr.state   = state
+        addr.pincode = pincode
+        addr.country = country
+        if phone: addr.phone = phone
+        if email: addr.email_id = email
+        addr.flags.ignore_mandatory = True
+        addr.save(ignore_permissions=True)
+    else:
+        addr = frappe.get_doc({
+            "doctype": "Address",
+            "address_title": address_title,
+            "address_type": "Shipping",
+            "address_line1": address_line1,
+            "address_line2": address_line2,
+            "city": city,
+            "state": state,
+            "pincode": pincode,
+            "country": country,
+            "phone": phone,
+            "email_id": email,
+            "links": [{"link_doctype": "Customer", "link_name": customer_name}],
+        })
+        addr.flags.ignore_mandatory = True
+        addr.insert(ignore_permissions=True)
+
+    frappe.db.commit()
+
+    parts = [address_line1]
+    if address_line2: parts.append(address_line2)
+    parts.append(f"{city}, {state} {pincode}")
+    if country and country not in ("US", "United States"): parts.append(country)
+
+    return addr.name, "\n".join(parts)
+
+
+def _ensure_item_exists(sku, item_name):
+    if not frappe.db.exists("Item", sku):
+        frappe.get_doc({
+            "doctype": "Item",
+            "item_code": sku,
+            "item_name": item_name,
+            "item_group": "Products",
+            "is_sales_item": 1,
+            "include_item_in_manufacturing": 0,
+        }).insert(ignore_permissions=True)
+        frappe.db.commit()
+
+
+def _build_so_items(items_list, delivery_date):
+    so_items = []
+    for item in items_list:
+        sku       = (item.get("sku") or item.get("lineItemKey") or "ETSY-ITEM").strip()
+        item_name = (item.get("name") or sku).strip()
+        qty       = float(item.get("quantity", 1))
+        rate      = float(item.get("unitPrice", 0))
+        options   = item.get("options", [])
+        custom_props = "\n".join(
+            f"{o.get('name', '')}: {o.get('value', '')}"
+            for o in options if o.get("name")
+        )
+        _ensure_item_exists(sku, item_name)
+        so_items.append({
+            "item_code": sku,
+            "delivery_date": delivery_date,
+            "qty": qty,
+            "rate": rate,
+            "warehouse": "Finished Goods - CCP",
+            "custom_shopify_properties": custom_props,
+        })
+    return so_items
+
+
+def _create_or_update_sales_order(order, customer_name, addr_name, full_address):
+    order_number = order.get("orderNumber", "")
+    order_status = order.get("orderStatus", "")
+    ss_order_id  = str(order.get("orderId", ""))
+    receipt_id   = _get_receipt_id(order_number)
+    po_number    = f"ETSY-{receipt_id}"
+
+    try:
+        trans_date = getdate(order.get("orderDate"))
+    except Exception:
+        trans_date = now_datetime().date()
+
+    try:
+        delivery_date = getdate(order.get("shipByDate")) if order.get("shipByDate") else add_days(trans_date, 7)
+    except Exception:
+        delivery_date = add_days(trans_date, 7)
+
+    ship_deadline = add_days(trans_date, 6)
+    sales_channel = _get_sales_channel(
+        order.get("advancedOptions", {}).get("storeId")
+    )
+
+    so_items = _build_so_items(order.get("items", []), delivery_date)
+    if not so_items:
+        frappe.log_error(f"No items in SS order {order_number}", "SS Order")
+        return None
+
+    should_submit = order_status in ("awaiting_shipment", "shipped")
+
+    ss_fields = {
+        SS_ORDER_ID_FIELD:  ss_order_id,
+        SS_ORDER_NUM_FIELD: order_number,
+        SS_STATUS_FIELD:    order_status,
+        SS_MODIFY_FIELD:    order.get("modifyDate", ""),
+    }
+
+    existing = None
+    if ss_order_id:
+        existing = frappe.db.get_value(
+            "Sales Order", {SS_ORDER_ID_FIELD: ss_order_id}, "name"
+        )
+    if not existing:
+        existing = frappe.db.get_value("Sales Order", {"po_no": po_number}, "name")
+
+    if existing:
+        so = frappe.get_doc("Sales Order", existing)
+        if so.docstatus == 1:
+            frappe.db.set_value("Sales Order", so.name, ss_fields, update_modified=False)
+            if addr_name:
+                frappe.db.set_value("Sales Order", so.name, {
+                    "shipping_address_name": addr_name,
+                    "shipping_address": full_address,
+                }, update_modified=False)
+        else:
+            so.items = []
+            for i in so_items: so.append("items", i)
+            so.transaction_date = trans_date
+            so.delivery_date    = delivery_date
+            so.ship_deadline    = ship_deadline
+            so.customer_notes   = order.get("customerNotes", "")
+            so.instructions     = order.get("internalNotes", "")
+            if sales_channel: so.custom_sales_channel = sales_channel
+            if addr_name:
+                so.shipping_address_name = addr_name
+                so.shipping_address      = full_address
+            for k, v in ss_fields.items(): setattr(so, k, v)
+            so.flags.ignore_mandatory = True
+            so.save(ignore_permissions=True)
+            if should_submit: so.submit()
+        frappe.db.commit()
+        return so.name
+
+    so_doc = {
+        "doctype": "Sales Order",
+        "customer": customer_name,
+        "transaction_date": trans_date,
+        "delivery_date": delivery_date,
+        "ship_deadline": ship_deadline,
+        "company": "Cozy Corner Patios LLC",
+        "order_type": "Sales",
+        "po_no": po_number,
+        "shopify_order_number": receipt_id,
+        "currency": "USD",
+        "set_warehouse": "Finished Goods - CCP",
+        "customer_notes": order.get("customerNotes", ""),
+        "instructions": order.get("internalNotes", ""),
+        "items": so_items,
+        **ss_fields,
+    }
+    if sales_channel: so_doc["custom_sales_channel"] = sales_channel
+    if addr_name:
+        so_doc["shipping_address_name"] = addr_name
+        so_doc["shipping_address"]      = full_address
+
+    so = frappe.get_doc(so_doc)
+    so.flags.ignore_mandatory = True
+    so.insert(ignore_permissions=True)
+    if should_submit: so.submit()
+    frappe.db.commit()
+    return so.name
+
+
+def sync_sales_order(payload, request_id=None):
+    """
+    Called for ORDER_NOTIFY.
+    Flow: Customer -> Address -> Sales Order (same order as Shopify).
+    """
+    frappe.set_user("Administrator")
+    frappe.flags.request_id = request_id
+
+    try:
+        order         = payload
+        customer_name = _sync_customer(order)
+        addr_name, full_address = _sync_address(order, customer_name)
+        so_name       = _create_or_update_sales_order(order, customer_name, addr_name, full_address)
+
+        if so_name and request_id:
+            frappe.db.set_value(
+                "Etsy Integration Log", request_id, "sales_order", so_name,
+                update_modified=False
+            )
+
+    except Exception as e:
+        _update_log(request_id, "Error", exception=e, rollback=True)
+    else:
+        _update_log(request_id, "Success")
+
+
+def handle_notification(payload, request_id=None):
+    """
+    Called for ITEM_ORDER_NOTIFY.
+    JSON already stored in log by connection.py.
+    Nothing else to do — read the log and act via Server Scripts.
+    """
+    frappe.flags.request_id = request_id
+    _update_log(request_id, "Success")
