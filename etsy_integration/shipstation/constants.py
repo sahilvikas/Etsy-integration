@@ -3,9 +3,9 @@ SETTING_DOCTYPE = "ShipStation Settings"
 MODULE_NAME = "shipstation"
 
 # Maps ShipStation resource_type to the handler function
+# Only ORDER_NOTIFY is handled — new orders only
 EVENT_MAPPER = {
     "ORDER_NOTIFY": "etsy_integration.shipstation.order.sync_sales_order",
-    "ITEM_ORDER_NOTIFY": "etsy_integration.shipstation.order.handle_notification",
 }
 
 # Custom fields on Sales Order

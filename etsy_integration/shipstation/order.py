@@ -170,7 +170,11 @@ def _build_so_items(items_list, delivery_date):
     return so_items
 
 
-def _create_or_update_sales_order(order, customer_name, addr_name, full_address):
+def _create_sales_order(order, customer_name, addr_name, full_address):
+    """
+    Creates a NEW Sales Order only.
+    Called only when the order does not exist in ERPNext yet.
+    """
     order_number = order.get("orderNumber", "")
     order_status = order.get("orderStatus", "")
     ss_order_id  = str(order.get("orderId", ""))
@@ -199,47 +203,6 @@ def _create_or_update_sales_order(order, customer_name, addr_name, full_address)
 
     should_submit = order_status in ("awaiting_shipment", "shipped")
 
-    ss_fields = {
-        SS_ORDER_ID_FIELD: ss_order_id,
-        SS_STATUS_FIELD:   order_status,
-    }
-
-    existing = None
-    if ss_order_id:
-        existing = frappe.db.get_value(
-            "Sales Order", {SS_ORDER_ID_FIELD: ss_order_id}, "name"
-        )
-    if not existing:
-        existing = frappe.db.get_value("Sales Order", {"po_no": po_number}, "name")
-
-    if existing:
-        so = frappe.get_doc("Sales Order", existing)
-        if so.docstatus == 1:
-            frappe.db.set_value("Sales Order", so.name, ss_fields, update_modified=False)
-            if addr_name:
-                frappe.db.set_value("Sales Order", so.name, {
-                    "shipping_address_name": addr_name,
-                    "shipping_address": full_address,
-                }, update_modified=False)
-        else:
-            so.items = []
-            for i in so_items: so.append("items", i)
-            so.transaction_date = trans_date
-            so.delivery_date    = delivery_date
-            so.ship_deadline    = ship_deadline
-            so.customer_notes   = order.get("customerNotes", "")
-            so.instructions     = order.get("internalNotes", "")
-            if sales_channel: so.custom_sales_channel = sales_channel
-            if addr_name:
-                so.shipping_address_name = addr_name
-                so.shipping_address      = full_address
-            for k, v in ss_fields.items(): setattr(so, k, v)
-            so.flags.ignore_mandatory = True
-            so.save(ignore_permissions=True)
-            if should_submit: so.submit()
-        frappe.db.commit()
-        return so.name
-
     so_doc = {
         "doctype": "Sales Order",
         "customer": customer_name,
@@ -255,7 +218,8 @@ def _create_or_update_sales_order(order, customer_name, addr_name, full_address)
         "customer_notes": order.get("customerNotes", ""),
         "instructions": order.get("internalNotes", ""),
         "items": so_items,
-        **ss_fields,
+        SS_ORDER_ID_FIELD: ss_order_id,
+        SS_STATUS_FIELD:   order_status,
     }
     if sales_channel: so_doc["custom_sales_channel"] = sales_channel
     if addr_name:
@@ -272,17 +236,42 @@ def _create_or_update_sales_order(order, customer_name, addr_name, full_address)
 
 def sync_sales_order(payload, request_id=None):
     """
-    Called for ORDER_NOTIFY.
-    Flow: Customer -> Address -> Sales Order (same order as Shopify).
+    Called for ORDER_NOTIFY — new orders only.
+    If the Sales Order already exists in ERPNext, skip entirely.
+    Flow: Customer -> Address -> Sales Order.
     """
     frappe.set_user("Administrator")
     frappe.flags.request_id = request_id
 
     try:
-        order         = payload
-        customer_name = _sync_customer(order)
+        order        = payload
+        ss_order_id  = str(order.get("orderId", ""))
+        order_number = order.get("orderNumber", "")
+        receipt_id   = _get_receipt_id(order_number)
+        po_number    = f"ETSY-{receipt_id}"
+
+        # Skip if Sales Order already exists — we only create, never update
+        existing = None
+        if ss_order_id:
+            existing = frappe.db.get_value(
+                "Sales Order", {SS_ORDER_ID_FIELD: ss_order_id}, "name"
+            )
+        if not existing:
+            existing = frappe.db.get_value("Sales Order", {"po_no": po_number}, "name")
+
+        if existing:
+            _update_log(request_id, "Success")
+            frappe.db.set_value(
+                "Etsy Integration Log", request_id,
+                "message", f"Skipped — SO {existing} already exists",
+                update_modified=False
+            )
+            return
+
+        # New order — run full flow
+        customer_name           = _sync_customer(order)
         addr_name, full_address = _sync_address(order, customer_name)
-        so_name       = _create_or_update_sales_order(order, customer_name, addr_name, full_address)
+        so_name                 = _create_sales_order(order, customer_name, addr_name, full_address)
 
         if so_name and request_id:
             frappe.db.set_value(
@@ -294,15 +283,3 @@ def sync_sales_order(payload, request_id=None):
         _update_log(request_id, "Error", exception=e, rollback=True)
     else:
         _update_log(request_id, "Success")
-
-
-def handle_notification(payload, request_id=None):
-    """
-    Called for ITEM_ORDER_NOTIFY.
-    JSON already stored in log by connection.py.
-    Nothing else to do — read the log and act via Server Scripts.
-    """
-    frappe.flags.request_id = request_id
-    _update_log(request_id, "Success")
-
-
