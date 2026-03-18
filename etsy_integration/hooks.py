@@ -16,7 +16,7 @@ override_whitelisted_methods = {
 
     # -------------------------------------------------------------------------
     # NEW — Single ShipStation webhook endpoint (replaces all Make.com)
-    # Register this URL in ShipStation for ORDER_NOTIFY and ITEM_ORDER_NOTIFY:
+    # Register this URL in ShipStation for ORDER_NOTIFY only:
     # https://your-erp.com/api/method/etsy_integration.shipstation.connection.store_request_data
     # -------------------------------------------------------------------------
     "etsy_integration.shipstation.connection.store_request_data": "etsy_integration.shipstation.connection.store_request_data",
@@ -27,3 +27,4 @@ scheduler_events = {}
 
 # No doc events needed — cancellation handled via Server Scripts
 doc_events = {}
+

@@ -260,12 +260,14 @@ def sync_sales_order(payload, request_id=None):
             existing = frappe.db.get_value("Sales Order", {"po_no": po_number}, "name")
 
         if existing:
+            if request_id:
+                frappe.db.set_value(
+                    "Etsy Integration Log", request_id,
+                    "message", f"Skipped — SO {existing} already exists",
+                    update_modified=False
+                )
+                frappe.db.commit()
             _update_log(request_id, "Success")
-            frappe.db.set_value(
-                "Etsy Integration Log", request_id,
-                "message", f"Skipped — SO {existing} already exists",
-                update_modified=False
-            )
             return
 
         # New order — run full flow
@@ -283,3 +285,4 @@ def sync_sales_order(payload, request_id=None):
         _update_log(request_id, "Error", exception=e, rollback=True)
     else:
         _update_log(request_id, "Success")
+

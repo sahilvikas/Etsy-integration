@@ -69,8 +69,7 @@ def store_request_data():
       URL: https://your-erp.com/api/method/etsy_integration.shipstation.connection.store_request_data
 
     Register for:
-      - On New Orders  (ORDER_NOTIFY)
-      - On New Items   (ITEM_ORDER_NOTIFY)
+      - On New Orders (ORDER_NOTIFY) only
     """
     if not frappe.request:
         return
@@ -111,4 +110,5 @@ def store_request_data():
     )
 
     return {"status": "queued", "log": log.name}
+
 
