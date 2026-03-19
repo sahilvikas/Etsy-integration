@@ -26,8 +26,9 @@ def create_etsy_log(event_type, method, request_data=None, status="Queued"):
 
 def get_ss_auth_headers():
     """Build Basic Auth header from ShipStation Settings api_key + api_secret."""
-    api_key = frappe.db.get_single_value(SETTING_DOCTYPE, "api_key")
-    api_secret = frappe.db.get_single_value(SETTING_DOCTYPE, "api_secret")
+    doc = frappe.get_doc(SETTING_DOCTYPE)
+    api_key = doc.api_key
+    api_secret = doc.get_password("api_secret")
     token = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     return {
         "Authorization": f"Basic {token}",
@@ -64,12 +65,9 @@ def store_request_data():
     """
     Single entry point for ALL ShipStation webhooks.
 
-    Register this ONE URL in ShipStation for each event:
+    Register this ONE URL in ShipStation for ORDER_NOTIFY only:
       Settings -> Integration Partners -> Webhooks -> Subscribe
       URL: https://your-erp.com/api/method/etsy_integration.shipstation.connection.store_request_data
-
-    Register for:
-      - On New Orders (ORDER_NOTIFY) only
     """
     if not frappe.request:
         return
@@ -78,7 +76,9 @@ def store_request_data():
     if not raw:
         return {"status": "empty"}
 
-    if isinstance(raw, bytes): raw = raw.decode("utf-8")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+
     data = json.loads(raw)
     resource_type = data.get("resource_type", "")
     resource_url = data.get("resource_url", "")
@@ -110,5 +110,3 @@ def store_request_data():
     )
 
     return {"status": "queued", "log": log.name}
-
-
