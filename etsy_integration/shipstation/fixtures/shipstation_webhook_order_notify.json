@@ -1,0 +1,4 @@
+﻿{
+  "resource_url": "https://ssapi.shipstation.com/orders?orderId=123456789",
+  "resource_type": "ORDER_NOTIFY"
+}

@@ -1,0 +1,38 @@
+﻿{
+  "orderId": 123456789,
+  "orderNumber": "ETSY-3938139725",
+  "orderStatus": "awaiting_shipment",
+  "orderDate": "2026-03-18T17:30:00.0000000",
+  "shipByDate": "2026-03-25T00:00:00.0000000",
+  "modifyDate": "2026-03-18T17:45:00.0000000",
+  "customerEmail": "buyer@example.com",
+  "customerUsername": "etsy_buyer_123",
+  "customerNotes": "Please leave at door",
+  "internalNotes": "Gift wrap",
+  "advancedOptions": {
+    "storeId": 12345
+  },
+  "shipTo": {
+    "name": "Jane Doe",
+    "street1": "123 Main St",
+    "street2": "Apt 4B",
+    "city": "Austin",
+    "state": "TX",
+    "postalCode": "78701",
+    "country": "United States",
+    "phone": "+1-512-555-0100"
+  },
+  "items": [
+    {
+      "lineItemKey": "abc-1",
+      "sku": "SKU-001",
+      "name": "Example Product",
+      "quantity": 1,
+      "unitPrice": 99.99,
+      "options": [
+        { "name": "Color", "value": "Black" },
+        { "name": "Size", "value": "Large" }
+      ]
+    }
+  ]
+}
