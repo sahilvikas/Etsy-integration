@@ -23,8 +23,16 @@ override_whitelisted_methods = {
 }
 
 # No scheduler needed — ShipStation pushes to us via webhooks
-scheduler_events = {}
+scheduler_events = {
+    "cron": {
+        "*/30 * * * *": [
+            "etsy_integration.tasks.poll_cancelled_orders"
+        ],
+    }
+}
 
 # No doc events needed — cancellation handled via Server Scripts
 doc_events = {}
+
+
 
