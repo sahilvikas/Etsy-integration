@@ -94,7 +94,15 @@ def _sync_address(order, customer_name):
     city = (ship_to.get("city") or "").strip()
     state = (ship_to.get("state") or "").strip()
     pincode = (ship_to.get("postalCode") or "").strip()
-    country = (ship_to.get("country") or "United States").strip()
+    country_code = (ship_to.get("country") or "").strip()
+    country_map = {
+        "US": "United States",
+        "CA": "Canada",
+        "GB": "United Kingdom",
+        "AU": "Australia",
+        "MX": "Mexico",
+    }
+    country = country_map.get(country_code, country_code) or "United States"
     phone = (ship_to.get("phone") or "").strip()
     email = (order.get("customerEmail") or "").strip()
 
