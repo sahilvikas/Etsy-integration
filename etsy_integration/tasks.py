@@ -70,12 +70,12 @@ def poll_cancelled_orders():
 
 def sync_missing_orders():
     """
-    Safety net — runs every 1 hour.
-    Fetches all awaiting_shipment Etsy orders from last 3 hours from ShipStation.
+    Safety net — runs every 15 minutes.
+    Fetches all awaiting_shipment Etsy orders from last 1 hour from ShipStation.
     Creates Sales Orders in ERPNext for any that are missing.
-    3 hour lookback with 1 hour run interval = guaranteed no gaps.
+    1 hour lookback with 15 minute run interval = overlap buffer for reliability.
     """
-    modify_start = add_to_date(now_datetime(), hours=-3)
+    modify_start = add_to_date(now_datetime(), hours=-1)
     since = str(modify_start).replace(" ", "T").split(".")[0]
 
     path = (

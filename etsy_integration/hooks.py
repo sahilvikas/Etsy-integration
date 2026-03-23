@@ -28,7 +28,7 @@ scheduler_events = {
         "*/30 * * * *": [
             "etsy_integration.tasks.poll_cancelled_orders"
         ],
-        "0 * * * *": [
+        "*/15 * * * *": [
             "etsy_integration.tasks.sync_missing_orders"
         ],
     }
