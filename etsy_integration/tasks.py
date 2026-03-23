@@ -5,7 +5,8 @@ import frappe
 import requests
 from frappe.utils import add_to_date, now_datetime
 
-from etsy_integration.shipstation.constants import SETTING_DOCTYPE
+from etsy_integration.shipstation.constants import SS_ORDER_ID_FIELD, SETTING_DOCTYPE
+from etsy_integration.shipstation.order import sync_sales_order
 
 
 def _ss_get(path):
@@ -65,3 +66,61 @@ def poll_cancelled_orders():
 
     frappe.db.set_single_value(SETTING_DOCTYPE, "last_cancel_check", now_datetime())
     frappe.db.commit()
+
+
+def sync_missing_orders():
+    """
+    Safety net — runs every 1 hour.
+    Fetches all awaiting_shipment Etsy orders from last 3 hours from ShipStation.
+    Creates Sales Orders in ERPNext for any that are missing.
+    3 hour lookback with 1 hour run interval = guaranteed no gaps.
+    """
+    modify_start = add_to_date(now_datetime(), hours=-3)
+    since = str(modify_start).replace(" ", "T").split(".")[0]
+
+    path = (
+        "/orders?orderStatus=awaiting_shipment"
+        "&pageSize=100"
+        "&sortBy=modifyDate"
+        "&sortDir=DESC"
+        f"&modifyDateStart={since}"
+    )
+
+    resp = _ss_get(path)
+    if resp.status_code != 200:
+        frappe.log_error(
+            f"sync_missing_orders failed: {resp.status_code}",
+            "SS Order Sync"
+        )
+        return
+
+    data = resp.json()
+    orders = data.get("orders", []) or []
+    new_created = 0
+
+    for order in orders:
+        try:
+            source = ((order.get("advancedOptions") or {}).get("source") or "").lower()
+            if source != "etsy":
+                continue
+
+            ss_order_id = str(order.get("orderId") or "").strip()
+            if ss_order_id and frappe.db.exists(
+                "Sales Order", {SS_ORDER_ID_FIELD: ss_order_id}
+            ):
+                continue
+
+            sync_sales_order(order)
+            new_created += 1
+
+        except Exception as e:
+            frappe.log_error(
+                str(e),
+                f"sync_missing_orders error: {order.get('orderNumber', '')}"
+            )
+
+    if new_created > 0:
+        frappe.log_error(
+            f"sync_missing_orders created {new_created} missing orders",
+            "SS Order Sync"
+        )

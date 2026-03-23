@@ -81,11 +81,11 @@ def get_ss_auth_headers():
     }
 
 
-def fetch_order_from_shipstation(resource_url, max_attempts=3, timeout=15):
+def fetch_orders_from_shipstation(resource_url, max_attempts=3, timeout=15):
     """
     ShipStation webhook only sends resource_url, not full data.
     We call back to resource_url to get the full order JSON.
-    Returns the first order dict from the orders[] array.
+    Returns the full orders[] list from ShipStation response.
     Retries up to max_attempts before failing.
     """
     last_error = None
@@ -96,8 +96,8 @@ def fetch_order_from_shipstation(resource_url, max_attempts=3, timeout=15):
                 data = resp.json()
                 orders = data.get("orders", [])
                 if orders:
-                    return orders[0]
-                return data
+                    return orders
+                return []
 
             last_error = f"Attempt {attempt}: HTTP {resp.status_code}"
         except Exception as e:
@@ -110,7 +110,7 @@ def fetch_order_from_shipstation(resource_url, max_attempts=3, timeout=15):
         f"ShipStation fetch failed after {max_attempts} attempts. URL={resource_url}. Last error={last_error}",
         "SS Connection",
     )
-    return None
+    return []
 
 
 @frappe.whitelist(allow_guest=True)
@@ -133,24 +133,24 @@ def store_request_data():
     if validation_error:
         return validation_error
 
-    order_data = fetch_order_from_shipstation(resource_url, max_attempts=3, timeout=15)
-    if not order_data:
-        return _error("Could not fetch order from ShipStation after 3 attempts")
+    orders = fetch_orders_from_shipstation(resource_url, max_attempts=3, timeout=15)
+    if not orders:
+        return {"status": "error", "message": "No orders in response"}
 
-    log = create_etsy_log(
-        event_type=resource_type,
-        method=EVENT_MAPPER[resource_type],
-        request_data=order_data,
-        status="Queued",
-    )
+    for order in orders:
+        log = create_etsy_log(
+            event_type=resource_type,
+            method=EVENT_MAPPER[resource_type],
+            request_data=order,
+            status="Queued",
+        )
+        frappe.enqueue(
+            method=EVENT_MAPPER[resource_type],
+            queue="short",
+            timeout=300,
+            is_async=True,
+            payload=order,
+            request_id=log.name,
+        )
 
-    frappe.enqueue(
-        method=EVENT_MAPPER[resource_type],
-        queue="short",
-        timeout=300,
-        is_async=True,
-        payload=order_data,
-        request_id=log.name,
-    )
-
-    return {"status": "queued", "log": log.name}
+    return {"status": "queued", "count": len(orders)}
