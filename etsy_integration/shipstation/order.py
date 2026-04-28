@@ -11,6 +11,33 @@ from etsy_integration.shipstation.constants import (
     STORE_CHANNEL_MAP_FIELD,
 )
 
+def _resolve_country(code_or_name):
+    """
+    ShipStation returns ISO2 country codes (CH, DE, ES, GB, FR, IT, NL...).
+    ERPNext's Country doctype is keyed by full name. This resolves either
+    form to the canonical Country.name by looking up Country.code.
+    """
+    if not code_or_name:
+        return "United States"
+
+    val = str(code_or_name).strip()
+
+    # Already a valid full country name?
+    if frappe.db.exists("Country", val):
+        return val
+
+    # ISO2 code lookup (Country.code is stored lowercase in Frappe)
+    country = frappe.db.get_value("Country", {"code": val.lower()}, "name")
+    if country:
+        return country
+
+    # Unknown — log and fall back so sync doesn't crash
+    frappe.log_error(
+        title="Etsy ShipStation: Unknown Country",
+        message="Could not resolve country: " + repr(code_or_name) + ". Falling back to United States."
+    )
+    return "United States"
+
 
 def _update_log(request_id, status, exception=None, rollback=False):
     if rollback:
