@@ -7,7 +7,14 @@ app_license = "mit"
 
 
 doc_events = {}
-scheduler_events = {}
+scheduler_events = {
+	"cron": {
+		"*/15 * * * *": [
+			"etsy_integration.tasks.fetch_maria_orders.run",
+			"etsy_integration.tasks.fetch_zip_orders.run"
+		]
+	}
+}
 
 override_whitelisted_methods = {
     "etsy_integration.api.etsy_webhook.receive_order": "etsy_integration.api.etsy_webhook.receive_order"
