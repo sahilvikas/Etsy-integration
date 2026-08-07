@@ -4,6 +4,17 @@ from etsy_integration.utils.etsy_api import (
     get_order_date, get_item_properties
 )
 
+COUNTRY_MAP = {
+    "US": "United States", "CA": "Canada", "GB": "United Kingdom",
+    "AU": "Australia", "NZ": "New Zealand", "DE": "Germany",
+    "FR": "France", "IT": "Italy", "ES": "Spain", "NL": "Netherlands",
+    "BE": "Belgium", "AT": "Austria", "CH": "Switzerland",
+    "SE": "Sweden", "NO": "Norway", "DK": "Denmark", "FI": "Finland",
+    "IE": "Ireland", "PT": "Portugal", "JP": "Japan", "MX": "Mexico",
+    "BR": "Brazil", "IN": "India", "SG": "Singapore", "HK": "Hong Kong",
+    "IL": "Israel", "PL": "Poland", "CZ": "Czech Republic", "GR": "Greece"
+}
+
 
 def run():
     """Scheduled task: Fetches new Etsy Maria orders every 15 minutes"""
@@ -55,6 +66,29 @@ def process_order(order, settings, now):
         }).insert(ignore_permissions=True)
         frappe.db.commit()
 
+    # Create Address document
+    addr_name = f"{customer_name} - {receipt_id}-Shipping"
+    if not frappe.db.exists("Address", addr_name):
+        country_iso = order.get("country_iso", "US")
+        country_full = COUNTRY_MAP.get(country_iso, country_iso)
+
+        frappe.get_doc({
+            "doctype": "Address",
+            "address_title": f"{customer_name} - {receipt_id}",
+            "address_type": "Shipping",
+            "address_line1": order.get("first_line", "") or customer_name,
+            "address_line2": order.get("second_line", "") or "",
+            "city": order.get("city", "") or "N/A",
+            "state": order.get("state", "") or "",
+            "pincode": order.get("zip", "") or "",
+            "country": country_full,
+            "links": [{
+                "link_doctype": "Customer",
+                "link_name": customer_name
+            }]
+        }).insert(ignore_permissions=True)
+        frappe.db.commit()
+
     created_ts = order.get("created_timestamp", 0)
     trans_date = get_order_date(created_ts)
     delivery_date = frappe.utils.add_days(trans_date, 7)
@@ -64,11 +98,11 @@ def process_order(order, settings, now):
 
     for txn in order.get("transactions", []):
         process_transaction(txn, order, receipt_id, customer_name, formatted_address,
-                          trans_date, delivery_date, subtotal, etsy_tax, settings, now)
+                          addr_name, trans_date, delivery_date, subtotal, etsy_tax, settings, now)
 
 
 def process_transaction(txn, order, receipt_id, customer_name, formatted_address,
-                       trans_date, delivery_date, subtotal, etsy_tax, settings, now):
+                       addr_name, trans_date, delivery_date, subtotal, etsy_tax, settings, now):
     """Process a single transaction within an order"""
     transaction_id = str(txn.get("transaction_id", ""))
     product_id = str(txn.get("product_id", ""))
@@ -118,6 +152,7 @@ def process_transaction(txn, order, receipt_id, customer_name, formatted_address
             "currency": settings.currency or "USD",
             "custom_sales_channel": "Etsy Maria",
             "shopify_order_number": receipt_id,
+            "shipping_address_name": addr_name,
             "shipping_address": formatted_address,
             "address_display": formatted_address,
             "items": [{
