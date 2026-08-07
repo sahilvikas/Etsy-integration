@@ -2,7 +2,9 @@
 
 ## Overview
 
-This custom app integrates Etsy stores directly with ERPNext, replacing the Make.com middleware dependency. It fetches orders from Etsy's API every 15 minutes and creates Sales Orders automatically.
+This custom app integrates Etsy stores directly with ERPNext, replacing the Make.com middleware dependency for order creation. It fetches orders from Etsy's API every 15 minutes, creates Sales Orders with correct pricing (subtotal + tax), proper Address documents, and auto-submits to trigger the C-Order → PO → F-Order chain.
+
+Buyer email is captured separately via Make.com scenarios since the Etsy API doesn't return buyer email due to privacy restrictions.
 
 ### Stores Integrated
 
@@ -15,45 +17,52 @@ This custom app integrates Etsy stores directly with ERPNext, replacing the Make
 
 ## Architecture
 
-### Before (Make.com)
+### Before (Make.com handles everything)
 
 ```
 Etsy → Make.com → ERPNext webhook (etsy_webhook.py)
 ```
 
-Make.com watched Etsy for orders, processed the data, and sent it to ERPNext via webhook.
+Make.com watched Etsy for orders, processed the data, and sent it to ERPNext via webhook. Single point of failure.
 
-### After (Direct Integration)
+### After (Direct Integration + Make.com for email only)
 
 ```
-ERPNext Scheduler (every 15 min) → Etsy API → Creates Sales Order → Auto-submits
+Order Creation:  ERPNext Scheduler (every 15 min) → Etsy API → Creates Sales Order → Auto-submits
+Email Capture:   Make.com (every 15 min) → Watches Etsy → Sends buyer email → ERPNext API
 ```
 
-ERPNext calls Etsy API directly. No middleman needed.
+ERPNext handles order creation directly. Make.com only sends buyer email — a lightweight, non-critical task.
 
 ---
 
 ## Complete Order Flow
 
 ```
-1. Scheduler runs every 15 minutes (hooks.py cron)
-2. Calls Etsy API — fetches only NEW orders (since last fetch)
-3. If token expired — auto-refreshes using refresh token
-4. Creates Customer (if new buyer)
-5. Creates Item (if new product)
-6. Creates C-Order (Sales Order) with:
-   - shopify_order_number = receipt_id
-   - Item rate = price minus coupon discount (subtotal)
-   - Tax row = Etsy sales tax
-   - Shipping address from Etsy
-   - custom_sales_channel = "Etsy Maria" or "Etsy Zipcushions"
-7. Auto-submits the C-Order
-8. Existing server scripts auto-trigger:
-   - "Sales Order Name" → sets C-{receipt_id}
-   - "Auto Create PO from CCP SO" → creates PO at 40% rate
-   - "Auto Create FAM SO from CCP PO" → creates F-{receipt_id}
-9. Logs result to Order Log (Success or Failed)
-10. Updates last_fetched timestamp
+1.  Scheduler runs every 15 minutes (hooks.py cron)
+2.  Calls Etsy API — fetches only NEW orders (since last fetch)
+3.  If token expired — auto-refreshes using refresh token
+4.  Creates Customer (if new buyer)
+5.  Creates Address document (Shipping type, linked to Customer)
+6.  Creates Item (if new product, non-stock)
+7.  Creates C-Order (Sales Order) with:
+    - shopify_order_number = receipt_id
+    - Item rate = price minus coupon discount (subtotal)
+    - Tax row = Etsy sales tax (Actual type)
+    - Shipping address document linked
+    - custom_sales_channel = "Etsy Maria" or "Etsy Zipcushions"
+8.  Auto-submits the C-Order
+9.  Existing server scripts auto-trigger:
+    - "Sales Order Name" → sets C-{receipt_id}
+    - "Auto Create PO from CCP SO" → creates PO at 40% rate
+    - "Auto Create FAM SO from CCP PO" → creates F-{receipt_id}
+10. Logs result to Order Log (Success or Failed with error message)
+11. Updates last_fetched timestamp
+
+Separately (Make.com):
+12. Make.com Watch Shop Receipts triggers on new order
+13. Sends buyer_email to ERPNext via contact_update API
+14. ERPNext finds Sales Order by shopify_order_number and stores email
 ```
 
 ---
@@ -64,7 +73,8 @@ ERPNext calls Etsy API directly. No middleman needed.
 etsy_integration/
 ├── api/
 │   ├── __init__.py
-│   └── etsy_webhook.py           ← Existing: Make.com webhook (kept for contact details)
+│   ├── etsy_webhook.py           ← Existing: Make.com webhook (kept for backward compatibility)
+│   └── contact_update.py         ← NEW: Receives buyer email from Make.com
 ├── tasks/
 │   ├── __init__.py
 │   ├── fetch_maria_orders.py     ← NEW: Maria store scheduler
@@ -108,8 +118,8 @@ Contains 3 functions:
 | Function | Purpose |
 |----------|---------|
 | `run()` | Entry point called by hooks.py every 15 min. Gets settings, fetches orders, processes each one, updates last_fetched |
-| `process_order()` | Processes one Etsy receipt. Skips if already logged. Creates Customer if new. Extracts subtotal, tax, address. Loops through transactions |
-| `process_transaction()` | Creates one Sales Order per transaction. Calculates rate (price - coupon). Adds tax row. Inserts, submits, logs result |
+| `process_order()` | Processes one Etsy receipt. Skips if already logged. Creates Customer and Address document. Extracts subtotal, tax, address. Loops through transactions |
+| `process_transaction()` | Creates one Sales Order per transaction. Calculates rate (price - coupon). Adds tax row. Links shipping address document. Inserts, submits, logs result |
 
 **Key identifiers:**
 - PO No format: `ETSY-{receipt_id}-{transaction_id}`
@@ -127,6 +137,21 @@ Same logic as Maria with these differences:
 | Sales Channel | `Etsy Maria` | `Etsy Zipcushions` |
 | Order Log | `Etsy Maria Order Log` | `Etsy Zipcushions Order Log` |
 | Settings | `Etsy Maria Settings` | `Etsy Zipcushions Settings` |
+
+### api/contact_update.py — Buyer Email Endpoint
+
+Receives buyer email from Make.com and updates the Sales Order.
+
+| Detail | Value |
+|--------|-------|
+| Endpoint | `POST /api/method/etsy_integration.api.contact_update.update_contact` |
+| Input | `{"receipt_id": "4135871984", "email": "buyer@gmail.com"}` |
+| What it does | Finds Sales Order by `shopify_order_number`, stores email in `custom_buyer_email` |
+| Auth | Guest allowed (Make.com calls without ERPNext credentials) |
+
+### api/etsy_webhook.py — Legacy Make.com Webhook
+
+**Not modified.** Kept for backward compatibility. Previously used by Make.com to create Sales Orders. Can be removed after direct integration is verified on production.
 
 ### hooks.py — Scheduler Registration
 
@@ -154,28 +179,46 @@ scheduler_events = {
 | `receipt_id` | `shopify_order_number` | 4135871984 |
 | `name` (buyer) | `customer` | Michelle Pohl |
 | `created_timestamp` | `transaction_date` | 2026-07-06 |
-| `first_line, city, state, zip` | `shipping_address`, `address_display` | 179 Hobson St, San Jose, CA 95110 |
+| `first_line, city, state, zip` | Address document + `shipping_address_name` | Linked Address doc |
 | Shop name | `custom_sales_channel` | Etsy Maria / Etsy Zipcushions |
 | `price - shop_coupon` | Item `rate` | $7.65 (after 15% discount) |
 | `subtotal` | Sales Order `total` | $7.65 |
-| `total_tax_cost` | `taxes` table (Actual type) | $0.66 |
-| `grandtotal` | `grand_total` (auto-calculated) | $8.31 |
+| `total_tax_cost` | `taxes` table (Actual type, US Sales Tax Payable) | $0.66 |
+| `grandtotal` | `grand_total` (auto-calculated: subtotal + tax) | $8.31 |
 | `variations` | `custom_shopify_properties` | Width: 25, Length: 59-61 |
+| `buyer_email` (via Make.com) | `custom_buyer_email` | buyer@gmail.com |
 
 ### Price Calculation
 
 ```
 Etsy receipt:
   Item total:    $9.00  (original price)
-  Coupon:       -$1.35  (15% off)
+  Coupon:       -$1.35  (15% off — shop_coupon field)
   Subtotal:     $7.65  → Sales Order item rate
-  Tax:           $0.66  → Sales Taxes and Charges row
-  Order total:   $8.31  → Sales Order grand_total (auto)
+  Tax:           $0.66  → Sales Taxes and Charges row (Actual type)
+  Order total:   $8.31  → Sales Order grand_total (auto-calculated)
 ```
+
+### Address Document
+
+For each order, an Address document is created:
+
+| Field | Source | Example |
+|-------|--------|---------|
+| `address_title` | `{customer} - {receipt_id}` | Jennifer Reid - 4136829003 |
+| `address_type` | Always "Shipping" | Shipping |
+| `address_line1` | `first_line` from Etsy | 109 Thomas Court |
+| `city` | `city` from Etsy | WASHINGTON |
+| `state` | `state` from Etsy | IL |
+| `pincode` | `zip` from Etsy | 61571 |
+| `country` | Mapped from `country_iso` | United States |
+| Link | Dynamic Link to Customer | Customer: Jennifer Reid |
+
+The Address document is linked to the Sales Order via `shipping_address_name`.
 
 ### C-Order / F-Order Chain
 
-Every submitted Sales Order triggers existing server scripts:
+Every submitted Sales Order triggers existing server scripts (not modified by this integration):
 
 ```
 C-Order submitted
@@ -195,6 +238,47 @@ C-Order submitted
 
 ---
 
+## Make.com Scenarios
+
+### Why Make.com is still needed
+
+The Etsy API returns `buyer_email: None` for all orders due to privacy restrictions. Make.com's Etsy module uses a different connection method that CAN access buyer email. Some buyers who use "Sign in with Apple" have Apple Private Relay emails which are hidden even from Make.com.
+
+### Scenario 1: Etsy Zipcushions — Contact Details
+
+```
+Module 1: Etsy Watch Shop Receipts (Zipcushions connection)
+    ↓
+Module 2: HTTP POST to /api/method/update_etsy_contact
+    Body: {"receipt_id": "{Receipt ID}", "email": "{buyer_email}"}
+```
+
+- Schedule: Every 15 minutes
+- `buyer_email` field available directly from Etsy module
+
+### Scenario 2: Etsy Maria — Contact Details
+
+```
+Module 1: Etsy Watch Shop Receipts (Maria connection)
+    ↓
+Module 2: HTTP POST to /api/method/update_etsy_contact
+    Body: {"receipt_id": "{Receipt ID}", "email": "{buyer_email}"}
+```
+
+- Schedule: Every 15 minutes
+- `buyer_email` available after running sample data ("Choose manually" first)
+
+### API Endpoint (Server Script on dev)
+
+Currently implemented as a Server Script `Update Etsy Contact` on dev. The custom app file `api/contact_update.py` provides the same functionality for production deployment.
+
+| Environment | URL |
+|-------------|-----|
+| Dev | `POST dev.cozycornerpatios.com/api/method/update_etsy_contact` |
+| Prod | `POST erp.cozycornerpatios.com/api/method/etsy_integration.api.contact_update.update_contact` |
+
+---
+
 ## Dependencies (Must exist on ERPNext site)
 
 ### Custom Doctypes
@@ -203,7 +287,7 @@ C-Order submitted
 |---------|------|---------|
 | Etsy Maria Settings | Single | Stores Maria API key, secret, shop ID, tokens, scheduler toggle |
 | Etsy Zipcushions Settings | Single | Stores Zipcushions credentials |
-| Etsy Maria Order Log | Regular | Logs every Maria order (Success/Failed) |
+| Etsy Maria Order Log | Regular | Logs every Maria order (Success/Failed) with receipt_id, customer, subtotal, address, variations |
 | Etsy Zipcushions Order Log | Regular | Logs every Zipcushions order |
 
 ### Custom Fields
@@ -214,6 +298,7 @@ C-Order submitted
 | Sales Order | custom_sales_channel | Data | "Etsy Maria" or "Etsy Zipcushions" |
 | Sales Order | custom_sales_order_name | Data | Auto-set: C-{receipt_id} |
 | Sales Order | custom_ccp_id | Data | Receipt ID (on F-Orders) |
+| Sales Order | custom_buyer_email | Data | Buyer email (from Make.com) |
 | Sales Order Item | custom_shopify_properties | Small Text | Item variations |
 | Purchase Order | custom_ccp_id | Data | Receipt ID for F-Order linking |
 
@@ -263,10 +348,27 @@ https://erp.cozycornerpatios.com/api/method/etsy_oauth_callback
 If refresh token expires (unused for 90 days), re-authorize via bench console:
 
 ```python
-# Step 1: Generate auth URL (PKCE flow)
-# Step 2: Open URL in browser, grant access
-# Step 3: Exchange code for tokens
-# Step 4: Save tokens to Settings
+import hashlib, base64, os, urllib.parse
+
+API_KEY = "your_keystring"
+REDIRECT_URI = "https://erp.cozycornerpatios.com/api/method/etsy_oauth_callback"
+
+code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
+code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b'=').decode('utf-8')
+
+params = {
+    "response_type": "code",
+    "redirect_uri": REDIRECT_URI,
+    "scope": "transactions_r shops_r address_r",
+    "client_id": API_KEY,
+    "state": "random123",
+    "code_challenge": code_challenge,
+    "code_challenge_method": "S256"
+}
+
+auth_url = f"https://www.etsy.com/oauth/connect?{urllib.parse.urlencode(params)}"
+# Open URL, grant access, copy code from redirect URL
+# Exchange code for tokens using requests.post
 ```
 
 ---
@@ -281,16 +383,31 @@ Orders are checked at 3 levels:
 
 ---
 
+## Country ISO Mapping
+
+The integration maps Etsy's `country_iso` codes to full country names for ERPNext Address documents:
+
+```
+US → United States, CA → Canada, GB → United Kingdom,
+AU → Australia, DE → Germany, FR → France, IT → Italy,
+ES → Spain, JP → Japan, MX → Mexico, BR → Brazil,
+IN → India, and 15+ more countries
+```
+
+Unknown ISO codes are stored as-is.
+
+---
+
 ## Monitoring
 
 ### Dashboards
 
-| Store | URL |
-|-------|-----|
-| Maria | `/etsy-maria-dashboard` |
-| Zipcushions | `/etsy-zipcushions-dashboard` |
+| Store | URL | Version |
+|-------|-----|---------|
+| Maria | `/etsy-maria-dashboard` | v5.0 |
+| Zipcushions | `/etsy-zipcushions-dashboard` | v2.0 |
 
-Features: stat cards (Successful, Failed, Today's Orders, Total Orders, Total Revenue), status/customer filters, date range, pagination, auto-refresh every 60 seconds.
+Features: stat cards (Successful, Failed, Today's Orders, Total Revenue, Emails Captured, Emails Missing, Last Scheduler Run, Last Email Received), status/customer filters, date range, pagination, email column in table, auto-refresh every 60 seconds.
 
 ### Error Logs
 
@@ -318,9 +435,11 @@ bench get-app https://github.com/sahilvikas/Etsy-integration.git --branch etsy-d
 bench --site sitename install-app etsy_integration
 bench restart
 
-# 2. Create Settings doctypes and configure credentials
+# 2. Create Settings doctypes and configure credentials via System Console
 # 3. Create Order Log doctypes
-# 4. Set enable_scheduler = 1 in Settings
+# 4. Create custom fields on Sales Order and Purchase Order
+# 5. Set enable_scheduler = 1 in Settings
+# 6. Create Make.com scenarios for buyer email
 ```
 
 ### Existing server
@@ -333,13 +452,34 @@ cd ~/frappe-bench
 bench restart
 ```
 
+### Disable old Server Scripts after deployment
+
+```python
+for name in ["Fetch Etsy Maria Orders", "Fetch Etsy Zipcushions Orders",
+             "Refresh Etsy Maria Token", "Refresh Etsy Zipcushions Token"]:
+    script = frappe.get_doc("Server Script", name)
+    script.disabled = 1
+    script.save(ignore_permissions=True)
+frappe.db.commit()
+```
+
+---
+
+## Known Limitations
+
+1. **Apple Private Relay emails** — Buyers who use "Sign in with Apple" have masked emails (e.g., `8yhbfxeu9w@privaterelay.appleid.com`). These are hidden from both the direct API and Make.com. Only visible on the Etsy web dashboard.
+
+2. **Buyer email not in direct API** — Etsy API returns `buyer_email: None` for all orders. Make.com is required for email capture.
+
+3. **One Sales Order per transaction** — If an Etsy receipt has 2 items, 2 separate Sales Orders are created (matching the existing Make.com behavior).
+
 ---
 
 ## What's NOT Changed
 
 | Component | Status |
 |-----------|--------|
-| `api/etsy_webhook.py` | Untouched — still available for Make.com contact details scenario |
+| `api/etsy_webhook.py` | Untouched — available for backward compatibility |
 | Existing server scripts | Untouched — C-Order/PO/F-Order chain works as before |
-| Custom doctypes | Untouched — created via System Console, not in app files |
-| Dashboards | Untouched — Web Pages in database |
+| Custom doctypes | Created via System Console, not in app files |
+| Dashboards | Web Pages in database, not in app files |
