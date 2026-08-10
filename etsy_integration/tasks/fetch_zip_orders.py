@@ -55,7 +55,7 @@ def process_order(order, settings, now):
     if already_logged:
         return
 
-    po_no = f"ETSYZ-{receipt_id}"
+    po_no = f"ETSY-{receipt_id}"
     if frappe.db.exists("Sales Order", {"po_no": po_no}):
         return
 
