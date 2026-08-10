@@ -43,19 +43,26 @@ def run():
 
 
 def process_order(order, settings, now):
-    """Process a single Etsy order"""
+    """Process a single Etsy order — creates ONE Sales Order with all items"""
     receipt_id = str(order.get("receipt_id", ""))
     customer_name = order.get("name", "")
 
     if not customer_name:
         return
 
+    # Skip if already processed
     already_logged = frappe.db.exists("Etsy Zipcushions Order Log", {"receipt_id": receipt_id, "status": "Success"})
     if already_logged:
         return
 
+    po_no = f"ETSYZ-{receipt_id}"
+    if frappe.db.exists("Sales Order", {"po_no": po_no}):
+        return
+
+    # Format address
     formatted_address = format_address(order)
 
+    # Create customer if needed
     if not frappe.db.exists("Customer", customer_name):
         frappe.get_doc({
             "doctype": "Customer",
@@ -89,48 +96,52 @@ def process_order(order, settings, now):
         }).insert(ignore_permissions=True)
         frappe.db.commit()
 
+    # Get order date
     created_ts = order.get("created_timestamp", 0)
     trans_date = get_order_date(created_ts)
     delivery_date = frappe.utils.add_days(trans_date, 7)
 
+    # Get order level prices
     subtotal = order.get("subtotal", {}).get("amount", 0) / order.get("subtotal", {}).get("divisor", 100)
     etsy_tax = order.get("total_tax_cost", {}).get("amount", 0) / order.get("total_tax_cost", {}).get("divisor", 100)
 
+    # Build items list — ALL transactions in ONE Sales Order
+    items = []
     for txn in order.get("transactions", []):
-        process_transaction(txn, order, receipt_id, customer_name, formatted_address,
-                          addr_name, trans_date, delivery_date, subtotal, etsy_tax, settings, now)
+        product_id = str(txn.get("product_id", ""))
 
+        if not frappe.db.exists("Item", product_id):
+            item_name = txn.get("title", product_id)[:140]
+            frappe.get_doc({
+                "doctype": "Item",
+                "item_code": product_id,
+                "item_name": item_name,
+                "item_group": "Products",
+                "stock_uom": "Nos",
+                "is_stock_item": 0
+            }).insert(ignore_permissions=True)
+            frappe.db.commit()
 
-def process_transaction(txn, order, receipt_id, customer_name, formatted_address,
-                       addr_name, trans_date, delivery_date, subtotal, etsy_tax, settings, now):
-    """Process a single transaction within an order"""
-    transaction_id = str(txn.get("transaction_id", ""))
-    product_id = str(txn.get("product_id", ""))
-    po_no = f"ETSYZ-{receipt_id}-{transaction_id}"
+        shopify_properties = get_item_properties(txn)
 
-    if frappe.db.exists("Sales Order", {"po_no": po_no}):
+        price_amount = txn.get("price", {}).get("amount", 0)
+        price_divisor = txn.get("price", {}).get("divisor", 100)
+        coupon = txn.get("shop_coupon", 0)
+        rate = round((price_amount / price_divisor) - coupon, 2)
+        qty = txn.get("quantity", 1)
+
+        items.append({
+            "item_code": product_id,
+            "delivery_date": delivery_date,
+            "qty": float(qty),
+            "rate": float(rate),
+            "custom_shopify_properties": shopify_properties
+        })
+
+    if not items:
         return
 
-    if not frappe.db.exists("Item", product_id):
-        item_name = txn.get("title", product_id)[:140]
-        frappe.get_doc({
-            "doctype": "Item",
-            "item_code": product_id,
-            "item_name": item_name,
-            "item_group": "Products",
-            "stock_uom": "Nos",
-            "is_stock_item": 0
-        }).insert(ignore_permissions=True)
-        frappe.db.commit()
-
-    shopify_properties = get_item_properties(txn)
-
-    price_amount = txn.get("price", {}).get("amount", 0)
-    price_divisor = txn.get("price", {}).get("divisor", 100)
-    coupon = txn.get("shop_coupon", 0)
-    rate = round((price_amount / price_divisor) - coupon, 2)
-    qty = txn.get("quantity", 1)
-
+    # Build taxes
     taxes = []
     if etsy_tax > 0:
         taxes.append({
@@ -141,6 +152,7 @@ def process_transaction(txn, order, receipt_id, customer_name, formatted_address
         })
 
     try:
+        # Create ONE Sales Order with all items
         so = frappe.get_doc({
             "doctype": "Sales Order",
             "customer": customer_name,
@@ -155,13 +167,7 @@ def process_transaction(txn, order, receipt_id, customer_name, formatted_address
             "shipping_address_name": addr_name,
             "shipping_address": formatted_address,
             "address_display": formatted_address,
-            "items": [{
-                "item_code": product_id,
-                "delivery_date": delivery_date,
-                "qty": float(qty),
-                "rate": float(rate),
-                "custom_shopify_properties": shopify_properties
-            }],
+            "items": items,
             "taxes": taxes
         })
         so.insert(ignore_permissions=True)
@@ -170,17 +176,18 @@ def process_transaction(txn, order, receipt_id, customer_name, formatted_address
         so.submit()
         frappe.db.commit()
 
+        # Log ONE entry per receipt
         frappe.get_doc({
             "doctype": "Etsy Zipcushions Order Log",
             "receipt_id": receipt_id,
-            "transaction_id": transaction_id,
+            "transaction_id": str(order.get("transactions", [{}])[0].get("transaction_id", "")),
             "customer_name": customer_name,
-            "product_id": product_id,
-            "qty": float(qty),
-            "rate": float(rate),
+            "product_id": str(order.get("transactions", [{}])[0].get("product_id", "")),
+            "qty": len(items),
+            "rate": items[0]["rate"],
             "order_total": subtotal,
             "shipping_address": formatted_address,
-            "variations": shopify_properties,
+            "variations": items[0].get("custom_shopify_properties", ""),
             "status": "Success",
             "sales_order": so.name,
             "order_date": trans_date,
@@ -192,9 +199,9 @@ def process_transaction(txn, order, receipt_id, customer_name, formatted_address
         frappe.get_doc({
             "doctype": "Etsy Zipcushions Order Log",
             "receipt_id": receipt_id,
-            "transaction_id": transaction_id,
+            "transaction_id": "",
             "customer_name": customer_name,
-            "product_id": product_id,
+            "product_id": "",
             "shipping_address": formatted_address,
             "status": "Failed",
             "error_message": str(e),
