@@ -7,9 +7,9 @@ app_license = "mit"
 
 
 doc_events = {}
-scheduler_events = {
+scheduler_events = { 
 	"cron": {
-		"*/15 * * * *": [
+		"*/5 * * * *": [
 			"etsy_integration.tasks.fetch_maria_orders.run",
 			"etsy_integration.tasks.fetch_zip_orders.run"
 		]
