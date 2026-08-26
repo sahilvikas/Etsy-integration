@@ -17,7 +17,7 @@ COUNTRY_MAP = {
 
 
 def run():
-    """Scheduled task: Fetches new Etsy Maria orders every 15 minutes"""
+    """Scheduled task: Fetches new Etsy Maria orders every 5 minutes"""
     settings = get_settings("maria")
 
     if not settings.enable_scheduler:
@@ -56,7 +56,26 @@ def process_order(order, settings, now):
         return
 
     po_no = f"ETSY-{receipt_id}"
-    if frappe.db.exists("Sales Order", {"po_no": po_no}):
+
+    # If Make.com already created it, log and skip
+    existing_so = frappe.db.exists("Sales Order", {"po_no": po_no})
+    if existing_so:
+        formatted_address = format_address(order)
+        created_ts = order.get("created_timestamp", 0)
+        trans_date = get_order_date(created_ts)
+        subtotal = order.get("subtotal", {}).get("amount", 0) / order.get("subtotal", {}).get("divisor", 100)
+        frappe.get_doc({
+            "doctype": "Etsy Maria Order Log",
+            "receipt_id": receipt_id,
+            "customer_name": customer_name,
+            "status": "Success",
+            "sales_order": existing_so,
+            "order_total": subtotal,
+            "shipping_address": formatted_address,
+            "order_date": trans_date,
+            "fetched_at": now
+        }).insert(ignore_permissions=True)
+        frappe.db.commit()
         return
 
     # Format address
@@ -130,13 +149,17 @@ def process_order(order, settings, now):
         rate = round((price_amount / price_divisor) - coupon, 2)
         qty = txn.get("quantity", 1)
 
-        items.append({
+        item_row = {
             "item_code": product_id,
             "delivery_date": delivery_date,
             "qty": float(qty),
             "rate": float(rate),
             "custom_shopify_properties": shopify_properties
-        })
+        }
+        is_stock = frappe.db.get_value("Item", product_id, "is_stock_item")
+        if is_stock:
+            item_row["warehouse"] = "Finished Goods - CCP"
+        items.append(item_row)
 
     if not items:
         return
