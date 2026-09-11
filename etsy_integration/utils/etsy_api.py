@@ -103,7 +103,7 @@ def get_order_date(created_timestamp):
 
 
 def get_item_properties(txn):
-    """Format variations or description into shopify_properties"""
+    """Format variations and the full description into shopify_properties"""
     variations = txn.get("variations", [])
     has_vars = False
     for v in variations:
@@ -111,12 +111,16 @@ def get_item_properties(txn):
             has_vars = True
             break
 
+    lines = []
     if has_vars:
-        lines = []
         for v in variations:
             if v.get("formatted_name") and v.get("formatted_value"):
                 lines.append(f"{v['formatted_name']}: {v['formatted_value']}")
-        return "\n".join(lines)
-    else:
-        desc = txn.get("description", "")
-        return desc[:500] if len(desc) > 500 else desc
+
+    desc = (txn.get("description", "") or "").strip()
+    if desc:
+        if lines:
+            lines.append("")
+        lines.append(desc)
+
+    return "\n".join(lines)
