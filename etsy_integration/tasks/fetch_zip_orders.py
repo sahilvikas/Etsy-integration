@@ -3,6 +3,7 @@ from etsy_integration.utils.etsy_api import (
     get_settings, fetch_orders, format_address,
     get_order_date, get_item_properties
 )
+from etsy_integration.tasks.reconcile import reconcile_window
 
 COUNTRY_MAP = {
     "US": "United States", "CA": "Canada", "GB": "United Kingdom",
@@ -23,6 +24,8 @@ def run():
     if not settings.enable_scheduler:
         return
 
+    window_start = settings.last_fetched
+
     try:
         orders = fetch_orders(settings)
     except Exception as e:
@@ -40,6 +43,8 @@ def run():
     settings.last_fetched = now
     settings.save(ignore_permissions=True)
     frappe.db.commit()
+
+    reconcile_window("zipcushions", window_start, now)
 
 
 def process_order(order, settings, now):
