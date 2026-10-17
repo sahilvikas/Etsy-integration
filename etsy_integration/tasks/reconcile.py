@@ -43,8 +43,8 @@ def _to_unix(dt_value):
     return None
 
 
-def _fetch_receipts_in_window(settings, min_created, max_created):
-    """Page through ALL paid receipts in the window"""
+def _fetch_receipts_in_window(settings, min_last_modified, max_last_modified):
+    """Page through ALL paid receipts modified in the window"""
     url = RECEIPTS_URL.format(shop_id=settings.shop_id)
     headers = get_headers(settings)
 
@@ -59,10 +59,10 @@ def _fetch_receipts_in_window(settings, min_created, max_created):
             "sort_on": "created",
             "sort_order": "desc"
         }
-        if min_created:
-            params["min_created"] = int(min_created)
-        if max_created:
-            params["max_created"] = int(max_created)
+        if min_last_modified:
+            params["min_last_modified"] = int(min_last_modified)
+        if max_last_modified:
+            params["max_last_modified"] = int(max_last_modified)
 
         response = requests.get(url, headers=headers, params=params)
 
@@ -97,7 +97,7 @@ def _log_gap(store_label, receipt, status, reason, sales_order=None, error_messa
     values = {
         "status": status,
         "reason": reason,
-        "customer_name": receipt.get("name", ""),
+        "customer_name": (receipt.get("name") or "").strip(),
         "order_date": get_order_date(receipt.get("created_timestamp", 0)),
         "order_total": order_total,
         "sales_order": sales_order,
@@ -125,7 +125,7 @@ def _log_gap(store_label, receipt, status, reason, sales_order=None, error_messa
     frappe.db.commit()
 
 
-def reconcile_store(store, min_created=None, max_created=None, now=None):
+def reconcile_store(store, min_last_modified=None, max_last_modified=None, now=None):
     """Verify every paid receipt in the window became a Sales Order, retry the ones that didn't"""
     conf = STORE_CONF.get(store)
     if not conf:
@@ -134,7 +134,7 @@ def reconcile_store(store, min_created=None, max_created=None, now=None):
     settings = get_settings(conf["settings_key"])
     now = now or frappe.utils.now_datetime()
 
-    receipts = _fetch_receipts_in_window(settings, min_created, max_created)
+    receipts = _fetch_receipts_in_window(settings, min_last_modified, max_last_modified)
 
     checked = 0
     recovered = 0
@@ -204,12 +204,13 @@ def reconcile_store(store, min_created=None, max_created=None, now=None):
 
 
 def reconcile_window(store, window_start, now):
-    """Inline entry point: reconcile just the window the fetch task covered"""
+    """Inline entry point: reconcile just the window the fetch task covered (same 15 min overlap)"""
     try:
+        start = _to_unix(window_start)
         return reconcile_store(
             store,
-            min_created=_to_unix(window_start),
-            max_created=_to_unix(now),
+            min_last_modified=start - 900 if start else None,
+            max_last_modified=_to_unix(now),
             now=now
         )
     except Exception as e:

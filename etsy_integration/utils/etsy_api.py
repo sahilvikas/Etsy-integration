@@ -89,11 +89,17 @@ def refresh_token(settings):
 
 
 def fetch_orders(settings):
-    """Fetch new orders from Etsy"""
+    """Fetch paid receipts modified since the last run.
+
+    Windowed on last-modified, not created: an order placed unpaid and paid later is
+    updated on payment, so it lands in the next window. 15 min overlap; process_order
+    skips receipts it has already handled.
+    """
     headers = get_headers(settings)
     shop_id = settings.shop_id
 
-    url = f"https://openapi.etsy.com/v3/application/shops/{shop_id}/receipts?was_paid=true&limit=25&sort_on=created&sort_order=desc"
+    url = f"https://openapi.etsy.com/v3/application/shops/{shop_id}/receipts"
+    params = {"was_paid": "true", "limit": 100, "offset": 0, "sort_on": "created", "sort_order": "desc"}
 
     if settings.last_fetched:
         last = str(settings.last_fetched)
@@ -101,20 +107,30 @@ def fetch_orders(settings):
             last = last.split(".")[0]
         ts_result = frappe.db.sql("SELECT UNIX_TIMESTAMP(%s)", (last,))
         if ts_result and ts_result[0][0]:
-            url += f"&min_created={int(ts_result[0][0])}"
+            params["min_last_modified"] = int(ts_result[0][0]) - 900
 
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json().get("results", [])
-    except Exception:
-        if refresh_token(settings):
-            headers = get_headers(settings)
-            response = requests.get(url, headers=headers)
+    receipts = []
+    while True:
+        try:
+            response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
-            return response.json().get("results", [])
-        # Auth could not be restored: raise so run() does NOT advance last_fetched
-        raise
+        except Exception:
+            if not refresh_token(settings):
+                # Auth could not be restored: raise so run() does NOT advance last_fetched
+                raise
+            headers = get_headers(settings)
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+
+        rows = response.json().get("results", []) or []
+        receipts.extend(rows)
+
+        # No lower bound (first run): newest page only, never the whole shop history
+        if "min_last_modified" not in params or len(rows) < params["limit"]:
+            break
+        params["offset"] += params["limit"]
+
+    return receipts
 
 
 def format_address(order):

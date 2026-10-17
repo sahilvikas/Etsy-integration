@@ -50,7 +50,7 @@ def run():
 def process_order(order, settings, now):
     """Process a single Etsy order — creates ONE Sales Order with all items"""
     receipt_id = str(order.get("receipt_id", ""))
-    customer_name = order.get("name", "")
+    customer_name = (order.get("name") or "").strip()
 
     if not customer_name:
         return
@@ -150,9 +150,10 @@ def process_order(order, settings, now):
 
         price_amount = txn.get("price", {}).get("amount", 0)
         price_divisor = txn.get("price", {}).get("divisor", 100)
-        coupon = txn.get("shop_coupon", 0)
-        rate = round((price_amount / price_divisor) - coupon, 2)
-        qty = txn.get("quantity", 1)
+        qty = txn.get("quantity", 1) or 1
+        # shop_coupon is the discount for the whole line, not per unit
+        coupon = float(txn.get("shop_coupon", 0) or 0)
+        rate = round((price_amount / price_divisor) - (coupon / qty), 2)
 
         item_row = {
             "item_code": product_id,
