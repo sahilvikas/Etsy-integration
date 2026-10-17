@@ -1,5 +1,6 @@
 import frappe
 import requests
+import time
 
 from etsy_integration.utils.etsy_api import (
     get_settings, get_headers, refresh_token,
@@ -26,6 +27,22 @@ STORE_CONF = {
 }
 
 STORE_LABEL_TO_KEY = {"Maria": "maria", "Zipcushions": "zipcushions"}
+
+MAX_RECEIPT_AGE_DAYS = 30
+
+
+def receipt_too_old(receipt):
+    """True if the receipt was created more than MAX_RECEIPT_AGE_DAYS ago — never create orders for those"""
+    created = int(receipt.get("created_timestamp") or 0)
+    return created < time.time() - MAX_RECEIPT_AGE_DAYS * 86400
+
+
+def existing_sales_order(receipt_id):
+    """Sales Order already made for this receipt: po_no ETSY-<id> or custom_ccp_id <id>"""
+    return (
+        frappe.db.exists("Sales Order", {"po_no": f"ETSY-{receipt_id}"})
+        or frappe.db.exists("Sales Order", {"custom_ccp_id": receipt_id})
+    )
 
 
 def _to_unix(dt_value):
@@ -146,10 +163,13 @@ def reconcile_store(store, min_last_modified=None, max_last_modified=None, now=N
             continue
 
         checked += 1
-        po_no = f"ETSY-{receipt_id}"
 
         # Already made it through — nothing to do
-        if frappe.db.exists("Sales Order", {"po_no": po_no}):
+        if existing_sales_order(receipt_id):
+            continue
+
+        # Too old to create — don't retry
+        if receipt_too_old(receipt):
             continue
 
         # Retry the order once through the store's own processor
@@ -161,7 +181,7 @@ def reconcile_store(store, min_last_modified=None, max_last_modified=None, now=N
             retry_error = str(e)
             frappe.db.rollback()
 
-        sales_order = frappe.db.exists("Sales Order", {"po_no": po_no})
+        sales_order = existing_sales_order(receipt_id)
 
         if sales_order:
             recovered += 1
@@ -257,10 +277,8 @@ def retry_receipt(receipt_id, store):
     settings = get_settings(conf["settings_key"])
     store_label = conf["store_label"]
 
-    po_no = f"ETSY-{receipt_id}"
-
     # Someone (or an earlier run) already created it
-    existing_so = frappe.db.exists("Sales Order", {"po_no": po_no})
+    existing_so = existing_sales_order(receipt_id)
     if existing_so:
         _update_recon_row(
             receipt_id, store_label, "Created",
@@ -315,7 +333,7 @@ def retry_receipt(receipt_id, store):
         retry_error = str(e)
         frappe.db.rollback()
 
-    sales_order = frappe.db.exists("Sales Order", {"po_no": po_no})
+    sales_order = existing_sales_order(receipt_id)
 
     if sales_order:
         _update_recon_row(

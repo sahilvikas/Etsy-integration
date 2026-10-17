@@ -3,7 +3,7 @@ from etsy_integration.utils.etsy_api import (
     get_settings, fetch_orders, format_address,
     get_order_date, get_item_properties
 )
-from etsy_integration.tasks.reconcile import reconcile_window
+from etsy_integration.tasks.reconcile import reconcile_window, receipt_too_old, existing_sales_order
 
 COUNTRY_MAP = {
     "US": "United States", "CA": "Canada", "GB": "United Kingdom",
@@ -55,6 +55,10 @@ def process_order(order, settings, now):
     if not customer_name:
         return
 
+    # Never create orders for receipts older than 30 days
+    if receipt_too_old(order):
+        return
+
     # Skip if already processed
     already_logged = frappe.db.exists("Etsy Zipcushions Order Log", {"receipt_id": receipt_id, "status": "Success"})
     if already_logged:
@@ -63,7 +67,7 @@ def process_order(order, settings, now):
     po_no = f"ETSY-{receipt_id}"
 
     # If Make.com already created it, log and skip
-    existing_so = frappe.db.exists("Sales Order", {"po_no": po_no})
+    existing_so = existing_sales_order(receipt_id)
     if existing_so:
         formatted_address = format_address(order)
         created_ts = order.get("created_timestamp", 0)
